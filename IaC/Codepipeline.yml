@@ -1,0 +1,431 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Setup CodeBuild and CodeDeploy pipeline
+
+Parameters:
+  notificationEmail:
+    Type: String
+    Default: 'fake@email.com'
+    Description: Default email for pipeline notifications
+  
+  repositoryName:
+    Type: String
+    Default: 'someRepo'
+    Description: Source repository for this pipeline
+
+Resources:
+  artifactsBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+
+  notificationTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      Subscription:
+        - Endpoint:
+            !Ref notificationEmail
+          Protocol: email
+
+  eventRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+              - events.amazonaws.com
+            Action:
+            - sts:AssumeRole
+      Path: '/'
+      Policies:
+        - PolicyName: eventpolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: 'codepipeline:StartPipelineExecution'
+                Resource: !Join
+                  - ':'
+                  - - 'arn:aws:codepipeline'
+                    - Fn::Sub: ${AWS::Region}
+                    - Fn::Sub: ${AWS::AccountId}
+                    - Ref: lambdaPipeline
+
+  lambdaTrustRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal: 
+              Service:
+              - lambda.amazonaws.com
+            Action: 
+              - sts:AssumeRole
+      Path: '/'
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonS3FullAccess
+      Policies:
+        - PolicyName: lambdaPolicy
+          PolicyDocument:
+            Statement:
+            - Effect: Allow
+              Action:
+              - lambda:*
+              - logs:*
+              - cloudwatch:*
+              - apigateway:*
+              - s3:*
+              - events:*
+              - kms:*
+              Resource: '*'
+            Version: '2012-10-17'
+
+  lambdaBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - codebuild.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: '/'
+      Policies:
+      - PolicyName: lambdaBuildPolicy
+        PolicyDocument:
+          Statement:
+          - Effect: Allow
+            Action: '*'
+            Resource: '*'
+          Version: '2012-10-17'
+
+  lambdaDeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - cloudformation.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: '/'
+      Policies:
+      - PolicyName: lambdaDeployPolicy
+        PolicyDocument:
+          Statement:
+          - Effect: Allow
+            Action:
+            - cloudformation:CreateStack
+            - cloudformation:DeleteStack
+            - cloudformation:DescribeStacks
+            - cloudformation:UpdateStack
+            - cloudformation:CreateChangeSet
+            - cloudformation:DeleteChangeSet
+            - cloudformation:DescribeChangeSet
+            - cloudformation:ExecuteChangeSet
+            - cloudformation:SetStackPolicy
+            - cloudformation:ValidateTemplate
+            Resource: 'arn:aws:cloudformation:eu-central-1:aws:transform/Serverless-2016-10-31'
+          - Effect: Allow
+            Action:
+            - s3:PutObject
+            - s3:GetObject
+            - s3:GetObjectVersion
+            Resource:
+            - !Sub 'arn:aws:s3:::${artifactsBucket}'
+          - Effect: Allow
+            Action:
+            - s3:*
+            Resource:
+            - !Sub 'arn:aws:s3:::${artifactsBucket}/*'
+          - Effect: Allow
+            Action: 
+            - apigateway:*
+            - codedeploy:*
+            - sns:*
+            - logs:*
+            - cloudwatch:*
+            - events:*
+            - s3:*
+            - iam:*
+            - lambda:*
+            Resource: '*'
+          - Effect: Allow
+            Action: iam:PassRole
+            Resource: !GetAtt lambdaTrustRole.Arn
+          Version: '2012-10-17'
+
+  lambdaPipelineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - codepipeline.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: "/"
+      Policies:
+      - PolicyName: lambdaPipelinePolicy
+        PolicyDocument:
+          Statement:
+          - Effect: Allow
+            Action:
+            - cloudformation:CreateStack
+            - cloudformation:DeleteStack
+            - cloudformation:DescribeStacks
+            - cloudformation:UpdateStack
+            - cloudformation:CreateChangeSet
+            - cloudformation:DeleteChangeSet
+            - cloudformation:DescribeChangeSet
+            - cloudformation:ExecuteChangeSet
+            - cloudformation:SetStackPolicy
+            - cloudformation:ValidateTemplate
+            Resource: 'arn:aws:cloudformation:eu-central-1:aws:transform/Serverless-2016-10-31'
+          - Action:
+            - kms:*
+            - codecommit:*
+            - codebuild:*
+            - codedeploy:*
+            - s3:*
+            - sns:*
+            - cloudformation:*
+            - iam:PassRole
+            Resource: "*"
+            Effect: Allow
+          Version: '2012-10-17'
+
+  lambdaPipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties: 
+      RoleArn: !GetAtt lambdaPipelineRole.Arn
+      Stages:
+        - Name: PullSource
+          Actions:
+          - InputArtifacts: []
+            Name: GetSource
+            ActionTypeId:
+              Category: Source
+              Owner: AWS
+              Version: 1
+              Provider: CodeCommit
+            OutputArtifacts:
+            - Name: lambdaSourceOutput
+            Configuration:
+              RepositoryName: !Ref repositoryName
+              BranchName: master
+              PollForSourceChanges: false
+            RunOrder: 1
+
+        - Name: TestsAndCodeCoverage
+          Actions:
+          - Name: LambdaTests
+            ActionTypeId:
+              Category: Test
+              Owner: AWS
+              Version: 1
+              Provider: CodeBuild
+            InputArtifacts:
+            - Name: lambdaSourceOutput
+            OutputArtifacts:
+            - Name: lambdaTestedOutput
+            RunOrder: 1
+            Configuration:
+              ProjectName: !Ref lambdaTest
+        
+        - Name: BuildArtifact
+          Actions:
+          - Name: LambdaBuild
+            ActionTypeId:
+              Category: Build
+              Owner: AWS
+              Version: 1
+              Provider: CodeBuild
+            InputArtifacts:
+            - Name: lambdaSourceOutput
+            OutputArtifacts:
+            - Name: lambdaBuildOutput
+            RunOrder: 1
+            Configuration:
+              ProjectName: !Ref lambdaBuild
+
+        - Name: DeployLambda
+          Actions:
+          - Name: CreateChangeSet
+            ActionTypeId:
+              Category: Deploy
+              Owner: AWS
+              Version: 1
+              Provider: CloudFormation
+            InputArtifacts:
+            - Name: lambdaBuildOutput
+            OutputArtifacts: []
+            RunOrder: 1
+            Configuration:
+              ActionMode: CHANGE_SET_REPLACE
+              StackName: simpleLambdaStack
+              ChangeSetName: simpleLambdaChangeSet
+              TemplatePath: lambdaBuildOutput::outputTemplate.yml
+              Capabilities: CAPABILITY_IAM
+              RoleArn: !GetAtt lambdaDeployRole.Arn
+          - Name: ManualApproval
+            ActionTypeId:
+              Category: Approval
+              Owner: AWS
+              Version: 1
+              Provider: Manual
+            RunOrder: 2
+            Configuration:
+              NotificationArn: !Ref notificationTopic
+              CustomData: 'Approve or reject the pipeline.'
+          - Name: ExecuteChangeSet
+            ActionTypeId:
+              Category: Deploy
+              Owner: AWS
+              Version: 1
+              Provider: CloudFormation
+            InputArtifacts:
+            - Name: lambdaBuildOutput
+            OutputArtifacts: []
+            RunOrder: 3
+            Configuration:
+              ActionMode: CHANGE_SET_EXECUTE
+              StackName: simpleLambdaStack
+              ChangeSetName: simpleLambdaChangeSet
+              RoleArn: !GetAtt lambdaDeployRole.Arn
+      ArtifactStore:
+        Type: S3
+        Location: !Ref artifactsBucket
+
+  lambdaTest:
+    Type: AWS::CodeBuild::Project
+    DependsOn: lambdaBuildRole
+    Properties:
+      Name: lambdaPipeline_Tests
+      Description: Tests
+      ServiceRole: !GetAtt lambdaBuildRole.Arn
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/amazonlinux2-x86_64-standard:3.0
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: !Sub |
+          version: 0.2
+          env:
+            shell: bash
+          phases:
+            install:
+              runtime-versions:
+                python: 3.8
+              commands:
+                - echo Starting Install stage on $(date)
+                - pip install pytest pytest-cov
+            build:
+              commands:
+                - echo Execute tests  on $(date)
+                - pytest tests/tests_lambda.py -vv --junit-xml=reports/unit.xml --cov=. --cov-report=xml
+                - mkdir coverage
+                - cp coverage.xml coverage/
+            post_build:
+              commands:
+                - echo Execute post-build  on $(date)
+          reports:
+            lambdaTestUnit:
+              files:
+                - '**/*'
+              base-directory: 'reports'
+              discard-paths: false
+              file-format: JUNITXML
+            lambdaTestCoverage:
+              files:
+                - '**/*'
+              base-directory: 'coverage'
+              discard-paths: false
+              file-format: COBERTURAXML
+      TimeoutInMinutes: 5
+
+  lambdaBuild:
+    Type: AWS::CodeBuild::Project
+    DependsOn: lambdaBuildRole
+    Properties:
+      Name: lambdaPipeline_Build
+      Description: Tests
+      ServiceRole: !GetAtt lambdaBuildRole.Arn
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/amazonlinux2-x86_64-standard:3.0
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: !Sub |
+          version: 0.2
+          env:
+            shell: bash
+          phases:
+            install:
+              runtime-versions:
+                python: 3.8
+              commands:
+                - echo Starting Install stage on $(date)
+            build:
+              commands:
+                - echo Execute build on $(date)
+                - ls -al
+                - !Sub aws cloudformation package --template-file template.yml --s3-bucket ${artifactsBucket} --output-template-file outputTemplate.yml
+            post_build:
+              commands:
+                - echo Execute post-build on $(date)
+          artifacts:
+            type: zip
+            files:
+              - template.yml
+              - outputTemplate.yml
+      TimeoutInMinutes: 5
+
+  masterPushRepoEvent:
+    Type: AWS::Events::Rule
+    DependsOn: eventRole
+    Properties:
+      Description: Execute when push to master branch
+      EventPattern:
+        source:
+          - aws.codecommit
+        detail-type:
+          - CodeCommit Repository State Change
+        resources: 
+          - 
+            !Join
+            - ':'
+            - - 'arn:aws:codecommit'
+              - Fn::Sub: ${AWS::Region}
+              - Fn::Sub: ${AWS::AccountId}
+              - 'pyconf_hydpy'
+        detail:
+          referenceType: 
+            - branch
+          referenceName:
+            - master
+      State: ENABLED
+      Targets: 
+        - 
+          Arn:
+            !Join
+            - ':'
+            - - 'arn:aws:codepipeline'
+              - Fn::Sub: ${AWS::Region}
+              - Fn::Sub: ${AWS::AccountId}
+              - Ref: lambdaPipeline
+          Id: masterPushRepoEvent
+          RoleArn: !GetAtt eventRole.Arn
