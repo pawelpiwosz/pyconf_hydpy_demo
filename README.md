@@ -1,4 +1,4 @@
-# Demo repository for [Pyconf Hyderabad 2020](https://pyconf.hydpy.org/2020/)
+# Demo repository for create CI/CD for AWS Lambda with AWS CloudFormation 
 
 ## Introduction
 
